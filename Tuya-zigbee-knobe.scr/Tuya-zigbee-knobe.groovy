@@ -15,17 +15,21 @@
 import physicalgraph.zigbee.zcl.DataType
 
 metadata {
-	definition (name: "Tuya zigbee knobe", namespace: "kim-pyeonggi", author: "JoblessGundam", ocfDeviceType: "x.com.st.d.remotecontroller") {
+	definition (name: "Tuya Smart Knob", namespace: "JoblessGundam", author: "JoblessGundam", ocfDeviceType: "x.com.st.d.remotecontroller") {
 		capability "Actuator"
+		capability "Color Temperature"
 		capability "Battery"
 		capability "Switch"
 		capability "Button"
 		capability "Switch Level"
 		capability "Configuration"
 		capability "Health Check"
+        
+        attribute "colorName", "string"
+        
 
-		fingerprint profileId: "0104", inClusters: "0000,1000,0003", outClusters: "0003,0004,0005,0006,0008,1000,0019", manufacturer: "Aurora", model: "Remote50AU", deviceJoinName: "Aurora Wireless Wall Remote"
-		fingerprint profileId: "0104", inClusters: "0000,1000,0003", outClusters: "0003,0004,0005,0006,0008,1000,0019", manufacturer: "LDS", model: "ZBT-DIMController-D0800", deviceJoinName: "Müller Licht Tint Mobile Switch"
+	    fingerprint profileId: "0104", inClusters: "0000 0001 0003 0004 0006 1000", outClusters: "0019 000A 0003 0004 0005 0006 0008 1000", manufacturer: "_TZ3000_4fhiwweb", model: "TS004F", deviceJoinName: "Tuya Smart Knob" 
+		fingerprint profileId: "0104", manufacturer: "_TZ3000_4fjiwweb", model: "TS004F", deviceJoinName: "Tuya Smart Knob" // Tuya smart knob *
 	}
 
 	tiles(scale: 2) {
@@ -43,14 +47,29 @@ metadata {
 				attributeState "battery", label: 'battery ${currentValue}%', unit: "%"
 			}
 		}
+
+		controlTile("colorTempSliderControl", "device.colorTemperature", "slider", width: 4, height: 2, inactiveLabel: false, range: "(2000..6500)") {
+			state "colorTemperature", action: "color temperature.setColorTemperature"
+		}
+		valueTile("colorName", "device.colorName", inactiveLabel: false, decoration: "flat", width: 2, height: 2) {
+			state "colorName", label: '${currentValue}'
+		}
+
 		main "switch"
-		details(["switch"])
+		details(["switch", "colorTempSliderControl", "colorName", "refresh"])
 	}
 }
 
+// Globals
+private getMOVE_TO_COLOR_TEMPERATURE_COMMAND() { 0x0A }
+
+private getCOLOR_CONTROL_CLUSTER() { 0x0300 }
+
+private getATTRIBUTE_COLOR_TEMPERATURE() { 0x0007 }
+
+def getcolorTemperature() {2200}
 def getSTEP() {5}
-def getDOUBLE_STEP() {10}
-def getTRIPLE_STEP() {15}
+def getSTEP2() {100}
 def getBATTERY_VOLTAGE_ATTR() { 0x0020 }
 def getBATTERY_PERCENT_ATTR() { 0x0021 }
 
@@ -62,49 +81,63 @@ def parse(String description) {
 	if (event) {
 		if (event.name=="level" && event.value==0) {}
 		else {
+			if (event.name == "colorTemperature") {
+				setGenericName(event.value)
+			}
 			sendEvent(event)
 		}
 	} else {
+		def cluster = zigbee.parse(description)
 		def descMap = zigbee.parseDescriptionAsMap(description)
-		if (descMap && descMap.clusterInt == 0x0006) {
-			if (descMap.commandInt == 0x01 || descMap.commandInt == 0x00) {
-				if (device.currentValue("level") == 0) {
-					sendEvent(name: "level", value: STEP)
-				}
-				sendEvent(name: "switch", value: device.currentValue("switch") == "on" ? "off" : "on")
+		if (cluster && cluster.clusterId == 0x0006 && cluster.command == 0x07) {
+			if (cluster.data[0] == 0x00) {
+				//log.debug "ON/OFF REPORTING CONFIG RESPONSE: " + cluster
+				sendEvent(name: "checkInterval", value: 60 * 12, displayed: false, data: [protocol: "zigbee", hubHardwareId: device.hub.hardwareID])
+			} else {
+				//log.warn "ON/OFF REPORTING CONFIG FAILED- error code:${cluster.data[0]}"
 			}
+		} else {
+			//log.warn "DID NOT PARSE MESSAGE for description : $description"
+			//log.debug "${cluster}"
+		}
+		if (descMap && descMap.clusterInt == 0x0300) {
+			def currentcolorTemperature = device.currentValue("colorTemperature") as Integer ?: 2000         
+            int delta2 = Integer.parseInt(descMap.data[1],16) / 11 * STEP2
+            log.debug "move to ${descMap.data}"               
+			if (descMap.commandInt == 0x4C) {
+				if (descMap.data[0] == "01") {
+					log.debug "pushed move up"
+                   	def value = Math.min(currentcolorTemperature + delta2, 6500)
+					sendEvent(name: "colorTemperature", value: value)
+				} else if (descMap.data[0] == "03") {
+					log.debug "pushed move down"
+					def value = Math.max(currentcolorTemperature - delta2, 2000)
+					sendEvent(name: "colorTemperature", value: value)
+				}
+                }
+		
 		} else if (descMap && descMap.clusterInt == 0x0008) {
-			def currentLevel = device.currentValue("level") as Integer ?: 0
-			if (descMap.commandInt == 0x02) {
-				def value = Math.min(currentLevel + STEP, 100)
-				log.debug "move to ${descMap.data}"
+        		def currentLevel = device.currentValue("level") as Integer ?: 0
+                int delta = Integer.parseInt(descMap.data[1],16) / 12 * STEP
+                log.debug "move to ${descMap.data}"
 				if (descMap.data[0] == "00") {
-					log.debug "move up"
+                    def value = Math.min(currentLevel + delta, 100)
 					sendEvent(name: "switch", value: "on")
 					sendEvent(name: "level", value: value)
+                    log.debug "move up"
+                    
 				} else if (descMap.data[0] == "01") {
 					log.debug "move down"
-					value = Math.max(currentLevel - STEP, 0)
+					def value = Math.max(currentLevel - delta, 0)
+                    sendEvent(name: "level", value: value)
 					// don't change level if switch will be turning off
 					if (value == 0) {
 						sendEvent(name: "switch", value: "off")
-					} else {
-						sendEvent(name: "level", value: value)
 					}
 				}
-			} else if (descMap.commandInt == 0x01) {
-				sendEvent(name: "level", value: descMap.data[0] == "00" ? 100 : STEP)
-				sendEvent(name: "switch", value: "on" )
-				log.debug "step to ${descMap.data}"
-			} else if (descMap.commandInt == 0x03) {
-				log.debug "stop move"
-			}
-		} else if (descMap && descMap.clusterInt == 0x0005) {
-			if (descMap.commandInt == 0x05) {
-				sendEvent(name: "button", value: "pushed", data: [buttonNumber: 1], isStateChange: true)
-			} else if (descMap.commandInt == 0x04) {
-				sendEvent(name: "button", value: "held", data: [buttonNumber: 1], isStateChange: true)
-			}
+		} else if (descMap && descMap.clusterInt == 0x0006) {
+        	log.debug "pushed"
+			sendEvent(name: "button", value: "pushed", data: [buttonNumber: 1], isStateChange: true)
 		} else {
 			log.warn "DID NOT PARSE MESSAGE for description : $description"
 			log.debug "${descMap}"
@@ -124,8 +157,8 @@ def handleBatteryEvents(descMap) {
 			// This would be a good thing to watch for and form some sort of device health alert if too many come in.
 			log.info "Invalid battery reading returned"
 		} else if (descMap.attrInt == BATTERY_VOLTAGE_ATTR && !isIkeaDimmer()) { // Ignore from IKEA Dimmer if it sends this since it is probably 0
-			def minVolts = 2.3
-			def maxVolts = 3.0
+			def minVolts = 2.1
+			def maxVolts = 3.2
 			def batteryValueVoltage = rawValue / 10
 
 			batteryValue = Math.round(((batteryValueVoltage - minVolts) / (maxVolts - minVolts)) * 100)
@@ -144,12 +177,22 @@ def handleBatteryEvents(descMap) {
 	return results
 }
 
+
+
 def off() {
 	sendEvent(name: "switch", value: "off", isStateChange: true)
 }
 
 def on() {
 	sendEvent(name: "switch", value: "on", isStateChange: true)
+}
+
+def refresh() {
+	zigbee.onOffRefresh() +
+			zigbee.levelRefresh() +
+			zigbee.colorTemperatureRefresh() +
+			zigbee.onOffConfig(0, 300) +
+			zigbee.levelConfig()
 }
 
 def setLevel(value, rate = null) {
@@ -161,6 +204,34 @@ def setLevel(value, rate = null) {
 		sendEvent(name: "switch", value: "on")
 	}
 	runIn(1, delayedSend, [data: createEvent(name: "level", value: value), overwrite: true])
+}
+
+
+def setColorTemperature(value) {
+	value = value as Integer
+	def tempInMired = Math.round(1000000 / value)
+	def finalHex = zigbee.swapEndianHex(zigbee.convertToHexString(tempInMired, 4))
+
+	List cmds = []
+	cmds << zigbee.readAttribute(COLOR_CONTROL_CLUSTER, ATTRIBUTE_COLOR_TEMPERATURE)
+	cmds
+}
+
+//Naming based on the wiki article here: http://en.wikipedia.org/wiki/Color_temperature
+def setGenericName(value) {
+	if (value != null) {
+		def genericName = "White"
+		if (value < 3300) {
+			genericName = "Soft White"
+		} else if (value < 4150) {
+			genericName = "Moonlight"
+		} else if (value <= 5000) {
+			genericName = "Cool White"
+		} else if (value >= 5000) {
+			genericName = "Daylight"
+		}
+		sendEvent(name: "colorName", value: genericName)
+	}
 }
 
 def delayedSend(data) {
@@ -179,21 +250,11 @@ def installed() {
 	sendEvent(name: "switch", value: "on", displayed: false)
 	sendEvent(name: "level", value: 100, displayed: false)
 	sendEvent(name: "button", value: "pushed", data: [buttonNumber: 1], displayed: false)
-	sendEvent(name: "numberOfButtons", value: 1, displayed: false)
 }
+
 
 def configure() {
 	sendEvent(name: "DeviceWatch-Enroll", value: [protocol: "zigbee", scheme:"untracked"].encodeAsJson(), displayed: false)
-
-	if (isCentraliteSwitch()) {
-		zigbee.addBinding(zigbee.ONOFF_CLUSTER) + zigbee.addBinding(zigbee.LEVEL_CONTROL_CLUSTER) +
-			zigbee.readAttribute(zigbee.POWER_CONFIGURATION_CLUSTER, BATTERY_VOLTAGE_ATTR) +
-			zigbee.batteryConfig(0, reportInterval, null)
-	} else {
-		zigbee.readAttribute(zigbee.POWER_CONFIGURATION_CLUSTER, BATTERY_PERCENT_ATTR) +
-			// Report no more frequently than 30 seconds, no less frequently than 6 hours, and when there is a change of 10% (expressed as half percents)
-			zigbee.configureReporting(zigbee.POWER_CONFIGURATION_CLUSTER, BATTERY_PERCENT_ATTR, DataType.UINT8, 30, reportInterval, 20)
-
 	//these are necessary to have the device report when its buttons are pushed
 	zigbee.addBinding(zigbee.ONOFF_CLUSTER) + zigbee.addBinding(zigbee.LEVEL_CONTROL_CLUSTER) + zigbee.addBinding(0x0005)
 }
